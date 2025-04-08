@@ -5,6 +5,10 @@ use eframe::{
 use egui::{CentralPanel, Context, SidePanel, TopBottomPanel};
 use serde::Deserialize;
 use std::sync::Arc;
+use egui::text::LayoutJob;
+use egui::{TextFormat, Color32, Stroke};
+use egui::{ RichText, ScrollArea,
+};
 
 #[derive(Deserialize, Debug)]
 pub struct LTResponse {
@@ -47,6 +51,12 @@ impl NoteApp {
 
     pub fn load_file_list(&mut self) {
         let path = std::path::Path::new("notes/");
+        if !path.exists() {
+            if let Err(e) = std::fs::create_dir(path) {
+                eprintln!("Failed to create notes folder: {}", e);
+                return;
+            }
+        }
         if let Ok(entries) = std::fs::read_dir(path) {
             self.files = entries
                 .filter_map(Result::ok)
@@ -56,6 +66,7 @@ impl NoteApp {
             self.files.sort();
         }
     }
+
 
     pub fn load_selected_file(&mut self) {
         if let Some(filename) = &self.selected_file {
@@ -100,6 +111,25 @@ impl NoteApp {
 
 impl App for NoteApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open").clicked() {
+                        // TODO: Trigger file open
+                    }
+                    if ui.button("Save").clicked() {
+                        self.save_current_file();
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    ui.label("Undo/Redo coming soon");
+                });
+                ui.menu_button("View", |ui| {
+                    ui.label("Theme: Dark");
+                });
+            });
+        });
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.label("📓 Note Taking App with Suggestions");
         });
@@ -112,6 +142,19 @@ impl App for NoteApp {
 
                 if ui.button("🔄 Refresh").clicked() {
                     self.load_file_list();
+                }
+
+                // 📂 File Explorer: Open any file
+                if ui.button("📂 Open File...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            self.note_content = content;
+                            self.selected_file = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .map(String::from);
+                        }
+                    }
                 }
 
                 let file_list = self.files.clone();
@@ -128,24 +171,81 @@ impl App for NoteApp {
                 }
             });
 
+
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("📝 Editor");
 
+            // Save button
             if ui.button("💾 Save").clicked() {
                 self.save_current_file();
             }
 
-            let available_size = ui.available_size(); // get full size of central panel
+            ui.separator();
 
-            // Expand multiline text box to fill area
-            ui.allocate_ui_with_layout(available_size, egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.note_content)
-                        .desired_rows(40)
-                        .desired_width(f32::INFINITY),
-                );
+            // Prepare fonts and styles
+            let base_format = TextFormat {
+                font_id: FontId::monospace(16.0),
+                color: Color32::WHITE,
+                ..Default::default()
+            };
+
+            let highlight_format = TextFormat {
+                font_id: FontId::monospace(16.0),
+                color: Color32::WHITE,
+                background: Color32::DARK_RED,
+                ..Default::default()
+            };
+
+            // Create a scrollable area
+            ScrollArea::vertical().show(ui, |ui| {
+                let lines: Vec<&str> = self.note_content.lines().collect();
+                let mut job = LayoutJob::default();
+                let mut offset = 0;
+
+                for (i, line) in lines.iter().enumerate() {
+                    // Line number
+                    let line_number = format!("{:>4} │ ", i + 1);
+                    job.append(&line_number, 0.0, TextFormat {
+                        font_id: FontId::monospace(16.0),
+                        color: Color32::GRAY,
+                        ..Default::default()
+                    });
+
+                    let mut cursor = 0;
+                    while cursor < line.len() {
+                        let mut matched = false;
+
+                        for suggestion in &self.suggestions {
+                            if suggestion.offset >= offset
+                                && suggestion.offset < offset + line.len()
+                                && suggestion.offset - offset == cursor
+                            {
+                                let rel_offset = suggestion.offset - offset;
+                                let len = suggestion.length.min(line.len() - rel_offset);
+                                let text = &line[rel_offset..rel_offset + len];
+
+                                job.append(text, 0.0, highlight_format.clone());
+                                cursor += len;
+                                matched = true;
+                                break;
+                            }
+                        }
+
+                        if !matched {
+                            let ch = &line[cursor..cursor + 1];
+                            job.append(ch, 0.0, base_format.clone());
+                            cursor += 1;
+                        }
+                    }
+
+                    job.append("\n", 0.0, base_format.clone());
+                    offset += line.len() + 1; // +1 for \n
+                }
+
+                ui.label(job);
             });
         });
+
 
 
 
@@ -162,12 +262,11 @@ impl App for NoteApp {
                 if self.suggestions.is_empty() {
                     ui.label("No suggestions yet.");
                 } else {
+                    // 🔁 Replace this whole for-loop with the new suggestion block:
                     for suggestion in &self.suggestions {
-                        let suggestion_text = format!(
-                            "{} → {}",
-                            &self.note_content[suggestion.offset..suggestion.offset + suggestion.length],
-                            suggestion.replacements.get(0).map_or("❌", |r| r.value.as_str())
-                        );
+                        let snippet = &self.note_content[suggestion.offset..suggestion.offset + suggestion.length];
+                        let replacement = suggestion.replacements.get(0).map(|r| r.value.as_str()).unwrap_or("❌");
+                        let suggestion_text = format!("{} → {}", snippet, replacement);
 
                         if ui.button(suggestion_text).clicked() {
                             if let Some(replacement) = suggestion.replacements.get(0) {
@@ -175,13 +274,14 @@ impl App for NoteApp {
                                     suggestion.offset..suggestion.offset + suggestion.length,
                                     &replacement.value,
                                 );
-                                self.check_suggestions(); // Refresh suggestions
-                                break;
+                                self.check_suggestions(); // refresh
+                                break; // avoid borrowing errors
                             }
                         }
                     }
                 }
             });
+
     }
 }
 
